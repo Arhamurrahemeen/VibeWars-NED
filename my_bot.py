@@ -12,7 +12,8 @@ v5 HAULER with DASH. Rules, checked top to bottom every turn:
      cap on hits in a row on one bot (ATTACK_CAP) -- OFF, it measured worse.
   4. An unprotected enemy first on a clear shot line within 4 -> SHOOT it.
      Rules 2-4 are skipped when carrying cargo and home is close to the
-     deadline, or while carrying a Core that can still uplink.
+     deadline, when carrying 40+ cargo value (CARGO_SAFE), or while carrying
+     a Core that can still uplink.
   5. Standing on a resource with room in the hold -> COLLECT it.
      Rules 5 and 8 skip a resource we could not still carry home in time.
   6. Hold full, or carrying cargo and only just enough turns left -> go home.
@@ -22,7 +23,8 @@ v5 HAULER with DASH. Rules, checked top to bottom every turn:
      beats rules 2, 3, 4 and 6). On the ground within 3 steps, hold empty,
      and we can still uplink before the end -> fetch and collect it. Planted
      by an enemy and reachable before uplink -> stand next to it to defuse.
-  8. A resource in sight -> walk to the nearest one (by path length).
+  8. A resource in sight, or remembered from earlier -> walk to the nearest
+     one (by path length). Remembered ones vanish once in sight and gone.
   9. Kill tags we can reach before they expire, and crates (when our item
      slot is empty, or the legendary one) -> walk there; COLLECT a crate.
      Crates are OFF (OPEN_CRATES) -- they measured worse; tags stay on.
@@ -56,6 +58,12 @@ CRATE_RANGE = 8
 # fleeing at low HP (rule 1) and walking to crates (rule 9). Tags stay on.
 FLEE_AT_LOW_HP = False
 OPEN_CRATES = False
+# Remember resources seen earlier and walk back to them (rule 8).
+REMEMBER_RESOURCES = True
+# DASH on ordinary trips to resources too, not only urgent ones.
+DASH_TO_RESOURCES = False
+# Carrying at least this much cargo value: don't start fights. None = off.
+CARGO_SAFE = 40
 # Keep this much energy after a DASH (it costs 10).
 DASH_MIN_ENERGY = 15
 
@@ -72,6 +80,7 @@ class MyBot(Bot):
         super().__init__(bot_id)
         self.waypoint = None
         self.attack_run = (None, 0)
+        self.known = {}
 
     def buy(self, shop):
         credits = shop.get("credits", 0) if isinstance(shop, dict) else 0
@@ -122,6 +131,7 @@ class MyBot(Bot):
             if isinstance(e.get("id"), str) and isinstance(e.get("x"), int) and isinstance(e.get("y"), int)
         ]
         resources = view.get("visible_resources") or []
+        self._remember(resources, pos, view.get("vision_range", 3))
         self.bots = {(e["x"], e["y"]) for e in enemies}
         self.danger = self._danger_cells(view.get("visible_bombs") or [])
         self._strict = self._loose = None
@@ -172,6 +182,8 @@ class MyBot(Bot):
             fight = home_dist is not None and home_dist + LATE_SLACK < turns_left
         else:
             fight = True
+        if CARGO_SAFE is not None and me["cargo_value"] >= CARGO_SAFE:
+            fight = False
 
         # Rule 2: use the held item when it pays.
         if fight and can_use:
@@ -269,13 +281,14 @@ class MyBot(Bot):
 
         # Rule 8: nearest visible resource.
         if room:
+            pool = self.known.values() if REMEMBER_RESOURCES else resources
             cells = {
-                (r["x"], r["y"]) for r in resources
+                (r["x"], r["y"]) for r in pool
                 if (r["x"], r["y"]) != pos
                 and worth_collecting((r["x"], r["y"]), self._distance((r["x"], r["y"])) or 99)
             }
             if cells:
-                action = self._go(lambda c: c in cells)
+                action = self._go(lambda c: c in cells, urgent=DASH_TO_RESOURCES)
                 if action:
                     return action
 
@@ -321,6 +334,19 @@ class MyBot(Bot):
             self.waypoint = (self.waypoint + 1) % len(WAYPOINTS)
 
         return Action.defend()
+
+    def _remember(self, resources, pos, vision):
+        """Keep resources seen earlier; forget ones now in sight but gone."""
+        seen = set()
+        for res in resources:
+            if isinstance(res.get("id"), str) and isinstance(res.get("x"), int) and isinstance(res.get("y"), int):
+                self.known[res["id"]] = {"x": res["x"], "y": res["y"]}
+                seen.add(res["id"])
+        for rid, res in list(self.known.items()):
+            cell = (res["x"], res["y"])
+            if rid not in seen and cheb(pos, cell) <= vision and geometry.line_clear(
+                    self.walls, pos[0], pos[1], cell[0], cell[1]):
+                del self.known[rid]
 
     def _use_item(self, item, me, enemies):
         pos = self.pos
